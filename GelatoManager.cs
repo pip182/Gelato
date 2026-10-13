@@ -1131,6 +1131,8 @@ public sealed class GelatoManager(
                 return x switch
                 {
                     null => false,
+                    // A catalog channel's item stands for the title; it is not the title.
+                    { ChannelId: var channel } when !channel.Equals(Guid.Empty) => false,
                     Video v => !v.IsStream(),
                     _ => true,
                 };

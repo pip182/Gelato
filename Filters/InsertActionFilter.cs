@@ -1,8 +1,10 @@
+using Gelato.Channels;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace Gelato.Filters;
@@ -11,6 +13,8 @@ public class InsertActionFilter(
     GelatoManager manager,
     IUserManager userManager,
     ILibraryManager libraryManager,
+    CatalogChannel catalogChannel,
+    IMemoryCache cache,
     ILogger<InsertActionFilter> log
 ) : IAsyncActionFilter, IOrderedFilter
 {
@@ -32,8 +36,9 @@ public class InsertActionFilter(
 
         // A client that opened a search result keeps the result's id in its page URL: the
         // reload, images, seasons, episodes, similar items and playback all name it. Every such
-        // id goes to the item the result became, whatever the action.
-        if (ctx.RedirectGuids(manager.GetInsertedId))
+        // id goes to the item the result became, whatever the action. A catalog channel's item
+        // is a search result too, and goes to its title once that is in the library.
+        if (ctx.RedirectGuids(id => manager.GetInsertedId(id) ?? FindOpenedChannelItem(id)))
         {
             await next();
             return;
@@ -56,6 +61,7 @@ public class InsertActionFilter(
             insertable
             && libraryManager.GetItemById(guid) is Series localSeries
             && !localSeries.IsGelato()
+            && localSeries.ChannelId.Equals(Guid.Empty)
         )
         {
             await HandleLocalSeriesAsync(userId, localSeries, ctx.HttpContext.RequestAborted);
@@ -63,7 +69,7 @@ public class InsertActionFilter(
             return;
         }
 
-        if (manager.GetStremioMeta(guid) is not { } stremioMeta)
+        if ((manager.GetStremioMeta(guid) ?? catalogChannel.GetMeta(guid)) is not { } stremioMeta)
         {
             await next();
             return;
@@ -198,13 +204,42 @@ public class InsertActionFilter(
         {
             if (
                 manager.GetInsertedId(guid) is not null
-                || manager.GetStremioMeta(guid) is not { } stremioMeta
+                || (manager.GetStremioMeta(guid) ?? catalogChannel.GetMeta(guid))
+                    is not { } stremioMeta
             )
                 continue;
 
             if (FindExisting(guid, stremioMeta, user) is null)
                 await InsertAsync(guid, stremioMeta, userId, user);
         }
+    }
+
+    /// <summary>
+    /// The library item the title of a catalog channel item is, when it is in the library. Asked
+    /// for every id of every request, before anything is known of the user: the channel answers
+    /// for its own items only. A title that is not in the library is not looked for again for a
+    /// minute, as a page of posters asks for each one's image; opening it puts it in regardless.
+    /// </summary>
+    private Guid? FindOpenedChannelItem(Guid id)
+    {
+        if (
+            catalogChannel.GetMeta(id) is not { } meta
+            || cache.TryGetValue($"catalogchannel-absent:{id}", out _)
+        )
+            return null;
+
+        if (
+            manager.IntoBaseItem(meta) is not { } item
+            || (manager.FindExistingItem(item) ?? manager.FindOutsideDefaultFolders(item))
+                is not { } existing
+        )
+        {
+            cache.Set($"catalogchannel-absent:{id}", true, TimeSpan.FromMinutes(1));
+            return null;
+        }
+
+        manager.RememberInsertedId(id, existing.Id);
+        return existing.Id;
     }
 
     /// <summary>
