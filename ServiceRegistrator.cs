@@ -1,3 +1,4 @@
+using Gelato.Channels;
 using Gelato.Config;
 using Gelato.Decorators;
 using Gelato.Filters;
@@ -8,6 +9,7 @@ using Gelato.ScheduledTasks;
 using Gelato.Services;
 //using IntroDbPlugin.Services;
 using MediaBrowser.Controller;
+using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Drawing;
@@ -55,6 +57,9 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<ItemEditLocks>();
         services.AddSingleton<ItemEditFilter>();
         services.AddSingleton<SyncPlaySources>();
+        services.AddSingleton<CatalogChannelOrderFilter>();
+        services.AddSingleton<CatalogChannel>();
+        services.AddSingleton<IChannel>(sp => sp.GetRequiredService<CatalogChannel>());
         services.AddSingleton<ItemIdLookup>();
         services.AddSingleton<GelatoManager>();
         services.AddSingleton<ItemWriteCounter>();
@@ -186,6 +191,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             o.Filters.AddService<LibraryStructureFilter>();
             o.Filters.AddService<SyncPlayFilter>();
             o.Filters.AddService<ItemEditFilter>();
+            o.Filters.AddService<CatalogChannelOrderFilter>();
         });
     }
 

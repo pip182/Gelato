@@ -1209,6 +1209,8 @@ public sealed class GelatoManager(
                     null => false,
                     _ when copyInto is not null && !x.HasStremioId() && !SharesLibrary(copyInto, x) =>
                         false,
+                    // A catalog channel's item stands for the title; it is not the title.
+                    { ChannelId: var channel } when !channel.Equals(Guid.Empty) => false,
                     Video v => !v.IsStremioNonPrimary(),
                     _ => true,
                 };

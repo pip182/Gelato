@@ -1,4 +1,5 @@
 using System.Reflection;
+using Gelato.Channels;
 using Gelato.Services;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Dto;
@@ -8,6 +9,7 @@ using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace Gelato.Filters;
@@ -19,6 +21,8 @@ public class InsertActionFilter(
     PendingSearchTitles pendingTitles,
     ParentalRatings parental,
     SearchActionFilter search,
+    CatalogChannel catalogChannel,
+    IMemoryCache cache,
     ILogger<InsertActionFilter> log
 ) : IAsyncActionFilter, IOrderedFilter
 {
@@ -50,11 +54,13 @@ public class InsertActionFilter(
         // reload, images, seasons, episodes, similar items and playback all name it. Every such
         // id goes to the item the result became, whatever the action. Not to one this user cannot
         // see: a title opened into the user's own folder that a catalog import took back to a
-        // library the user cannot open answered 404. That id goes on below as a search result.
+        // library the user cannot open answered 404. That id goes on below as a search result. A
+        // catalog channel's item is a search result too, and goes to its title once that is in
+        // the library.
         var viewer = ctx.TryGetUserId(out var viewerId) ? userManager.GetUserById(viewerId) : null;
         if (
             ctx.RedirectGuids(searchId =>
-                manager.GetInsertedId(searchId) is { } id
+                (manager.GetInsertedId(searchId) ?? FindOpenedChannelItem(searchId)) is { } id
                 && (viewer is null || libraryManager.GetItemById<BaseItem>(id, viewer) is not null)
                     ? id
                     : null
@@ -87,6 +93,7 @@ public class InsertActionFilter(
             insertable
             && libraryManager.GetItemById(guid) is Series localSeries
             && !localSeries.HasStremioId()
+            && localSeries.ChannelId.Equals(Guid.Empty)
         )
         {
             await HandleLocalSeriesAsync(userId, localSeries, ctx.HttpContext.RequestAborted);
@@ -94,7 +101,7 @@ public class InsertActionFilter(
             return;
         }
 
-        if (manager.GetStremioMeta(guid) is not { } stremioMeta)
+        if ((manager.GetStremioMeta(guid) ?? catalogChannel.GetMeta(guid)) is not { } stremioMeta)
         {
             await next();
             return;
@@ -281,7 +288,8 @@ public class InsertActionFilter(
         {
             if (
                 manager.GetInsertedId(guid) is not null
-                || manager.GetStremioMeta(guid) is not { } stremioMeta
+                || (manager.GetStremioMeta(guid) ?? catalogChannel.GetMeta(guid))
+                    is not { } stremioMeta
             )
                 continue;
 
@@ -292,6 +300,34 @@ public class InsertActionFilter(
             )
                 await InsertAsync(guid, stremioMeta, userId, user, copy);
         }
+    }
+
+    /// <summary>
+    /// The library item the title of a catalog channel item is, when it is in the library. Asked
+    /// for every id of every request, before anything is known of the user: the channel answers
+    /// for its own items only. A title that is not in the library is not looked for again for a
+    /// minute, as a page of posters asks for each one's image; opening it puts it in regardless.
+    /// </summary>
+    private Guid? FindOpenedChannelItem(Guid id)
+    {
+        if (
+            catalogChannel.GetMeta(id) is not { } meta
+            || cache.TryGetValue($"catalogchannel-absent:{id}", out _)
+        )
+            return null;
+
+        if (
+            manager.IntoBaseItem(meta) is not { } item
+            || (manager.FindExistingItem(item) ?? manager.FindOutsideDefaultFolders(item))
+                is not { } existing
+        )
+        {
+            cache.Set($"catalogchannel-absent:{id}", true, TimeSpan.FromMinutes(1));
+            return null;
+        }
+
+        manager.RememberInsertedId(id, existing.Id);
+        return existing.Id;
     }
 
     /// <summary>
