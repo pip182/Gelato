@@ -32,6 +32,12 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
 {
     public const string ChannelName = "Gelato Catalogs";
 
+    /// <summary>How many titles a catalog folder holds before its "More" folder.</summary>
+    private const int PageSize = 50;
+
+    /// <summary>The most of the addon's pages asked for to fill one of the channel's.</summary>
+    private const int MaxAddonPages = 5;
+
     /// <summary>The position "More" takes, after every title of a page.</summary>
     private const int MorePosition = 1_000_000;
 
@@ -248,7 +254,8 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
 
     /// <summary>
     /// One page of a catalog, and a "More" folder for the next one when the catalog pages and this
-    /// page was not empty.
+    /// page did not reach its end. An addon's page is short (AIOStreams answers 20 titles), so a
+    /// page here is made of as many of the addon's as it takes to hold <see cref="PageSize"/>.
     /// </summary>
     private static async Task<List<ChannelItemInfo>> ListPageAsync(
         GelatoStremioProvider stremio,
@@ -258,30 +265,46 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         int skip
     )
     {
-        var page = await stremio
-            .GetCatalogMetasAsync(id, type, skip: skip > 0 ? skip : null)
-            .ConfigureAwait(false);
-
-        var items = page.Select((meta, i) => (meta, position: skip + i))
-            .Where(x =>
-                x.meta.IsValid()
-                && x.meta.Type is StremioMediaType.Movie or StremioMediaType.Series
-                && (!cfg.FilterUnreleased || x.meta.IsReleased(cfg.FilterUnreleasedBufferDays))
-            )
-            .Select(x => ToChannelItem(x.meta, type, id, x.position))
-            .ToList();
-
         var manifest = await stremio.GetManifestAsync().ConfigureAwait(false);
         var pages =
             manifest?.Catalogs.FirstOrDefault(c => c.Id == id && c.Type == type) is { } catalog
             && catalog.Extra.Any(e =>
                 string.Equals(e.Name, "skip", StringComparison.OrdinalIgnoreCase)
             );
-        if (pages && page.Count > 0)
+
+        var metas = new List<StremioMeta>();
+        var ended = false;
+        for (var asked = 0; asked < MaxAddonPages && metas.Count < PageSize; asked++)
+        {
+            var offset = skip + metas.Count;
+            var page = await stremio
+                .GetCatalogMetasAsync(id, type, skip: offset > 0 ? offset : null)
+                .ConfigureAwait(false);
+            metas.AddRange(page);
+            if (page.Count == 0 || !pages)
+            {
+                ended = page.Count == 0;
+                break;
+            }
+        }
+
+        var items = metas
+            .Select((meta, i) => (meta, position: skip + i))
+            .Where(x =>
+                x.meta.IsValid()
+                && x.meta.Type is StremioMediaType.Movie or StremioMediaType.Series
+                && (!cfg.FilterUnreleased || x.meta.IsReleased(cfg.FilterUnreleasedBufferDays))
+            )
+            // An addon's pages can overlap where its list moved between two of them.
+            .DistinctBy(x => x.meta.Id)
+            .Select(x => ToChannelItem(x.meta, type, id, x.position))
+            .ToList();
+
+        if (pages && !ended && metas.Count > 0)
             items.Add(
                 new ChannelItemInfo
                 {
-                    Id = Encode(CatalogPrefix, type, id, (skip + page.Count).ToString()),
+                    Id = Encode(CatalogPrefix, type, id, (skip + metas.Count).ToString()),
                     Name = "More…",
                     Type = ChannelItemType.Folder,
                     FolderType = ChannelFolderType.Container,
