@@ -16,6 +16,8 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="System.Reflection.TypeExtensions" Version="4.7.0" />
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.0" PrivateAssets="all" />
+    <!-- Jellyfin's own copy at runtime: the version it ships (Directory.Packages.props). -->
+    <PackageReference Include="SkiaSharp" Version="3.119.4" PrivateAssets="all" ExcludeAssets="runtime;native" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Config\config.html" />
