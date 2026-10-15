@@ -17,15 +17,18 @@ namespace Gelato.Channels;
 /// </remarks>
 public sealed class CatalogArt(IApplicationPaths appPaths, ILogger<CatalogArt> log)
 {
-    private const int Width = 400;
+    // Square: Jellyfin's clients lay out cards by their image's shape, and fit fewer, larger
+    // square cards to a row than poster-shaped ones.
+    private const int Width = 600;
     private const int Height = 600;
 
-    /// <summary>
-    /// The room kept clear around the card's contents. Its text starts at the left gutter: Jellyfin
-    /// sizes an SVG by what it draws, and Svg.Skia measures centred text as if it started at its
-    /// anchor, so a centred name would make the card wider than it is.
-    /// </summary>
+    /// <summary>The room kept clear on either side of the name.</summary>
     private const int Gutter = 40;
+
+    private const int MaxTitleSize = 80;
+    private const int MinTitleSize = 32;
+
+    private const string FontFamilies = "Noto Sans, DejaVu Sans, sans-serif";
 
     /// <summary>An icon as the inner markup of a 24x24, stroked SVG, and its card's colours.</summary>
     private sealed record Style(string Icon, string From, string To);
@@ -151,14 +154,23 @@ public sealed class CatalogArt(IApplicationPaths appPaths, ILogger<CatalogArt> l
 
     private static string Draw(string name, bool movies, Style style)
     {
-        var title = SecurityElement.Escape(name.Trim());
-        // As large as fits between the card's gutters, a bold letter taken as 0.68 of its size
-        // wide: a long name gets smaller letters, not a cut.
+        var text = name.Trim();
+        var title = SecurityElement.Escape(text);
+        // As large as fits between the card's gutters: a long name gets smaller letters, not a cut.
+        var width = MeasureTitle(text, MaxTitleSize);
         var size = Math.Clamp(
-            (int)((Width - 2 * Gutter) / (Math.Max(name.Trim().Length, 1) * 0.68)),
-            20,
-            44
+            (int)(MaxTitleSize * (Width - 2 * Gutter) / Math.Max(width, 1)),
+            MinTitleSize,
+            MaxTitleSize
         );
+        // Centred by hand: Svg.Skia measures text centred with text-anchor as if it started at
+        // its anchor, and Jellyfin sizes an SVG by what it draws, so a centred name would make
+        // the card wider than it is.
+        var titleX = (int)Math.Max(Gutter, (Width - MeasureTitle(text, size)) / 2);
+        // The name hangs from just under the icon, the kind of titles under it.
+        var titleY = 290 + size;
+        var kindY = titleY + 66;
+        var kind = movies ? "MOVIES" : "SHOWS";
 
         return $"""
             <svg xmlns="http://www.w3.org/2000/svg" width="{Width}" height="{Height}" viewBox="0 0 {Width} {Height}">
@@ -169,22 +181,49 @@ public sealed class CatalogArt(IApplicationPaths appPaths, ILogger<CatalogArt> l
                 </linearGradient>
               </defs>
               <rect width="{Width}" height="{Height}" fill="url(#bg)"/>
-              <g transform="translate(170 150) scale(9)" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>
-              <circle cx="{Gutter + 56}" cy="{Gutter
-                + 56}" r="56" fill="#ffffff" fill-opacity="0.14"/>
-              <g transform="translate({Gutter + 20} {Gutter
-                + 20}) scale(3)" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>
-              <text x="{Gutter}" y="{Height
-                - Gutter
-                - size
-                - 16}" font-family="Noto Sans, DejaVu Sans, sans-serif" font-weight="600" font-size="18" letter-spacing="5" fill="#ffffff" fill-opacity="0.75">{(
-                movies ? "MOVIES" : "SHOWS"
-            )}</text>
-              <text x="{Gutter}" y="{Height
-                - Gutter
-                - 6}" font-family="Noto Sans, DejaVu Sans, sans-serif" font-weight="700" font-size="{size}" fill="#ffffff">{title}</text>
+              <g transform="translate(370 370) scale(9)" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>
+              <circle cx="300" cy="170" r="88" fill="#ffffff" fill-opacity="0.12"/>
+              <g transform="translate(246 116) scale(4.5)" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>
+              <text x="{titleX}" y="{titleY}" font-family="{FontFamilies}" font-weight="700" font-size="{size}" fill="#ffffff">{title}</text>
+              <text x="300" y="{kindY}" text-anchor="middle" font-family="{FontFamilies}" font-weight="600" font-size="30" letter-spacing="8" fill="#ffffff" fill-opacity="0.75">{kind}</text>
             </svg>
             """;
+    }
+
+    /// <summary>
+    /// How wide the name is drawn in bold at <paramref name="size"/>, by the typeface Svg.Skia
+    /// picks for <see cref="FontFamilies"/>. A bold letter taken as 0.68 of its size wide when
+    /// Jellyfin's SkiaSharp cannot be used.
+    /// </summary>
+    private static float MeasureTitle(string text, float size)
+    {
+        try
+        {
+            return MeasureWithSkia(text, size);
+        }
+        catch (Exception ex)
+            when (ex is TypeLoadException or FileNotFoundException or DllNotFoundException)
+        {
+            return text.Length * size * 0.68f;
+        }
+    }
+
+    // Kept apart so a SkiaSharp that cannot be loaded fails the call, not the caller's compile.
+    [System.Runtime.CompilerServices.MethodImpl(
+        System.Runtime.CompilerServices.MethodImplOptions.NoInlining
+    )]
+    private static float MeasureWithSkia(string text, float size)
+    {
+        var typeface =
+            FontFamilies
+                .Split(',', StringSplitOptions.TrimEntries)
+                .Select(f =>
+                    SkiaSharp.SKFontManager.Default.MatchFamily(f, SkiaSharp.SKFontStyle.Bold)
+                )
+                .FirstOrDefault(t => t is not null)
+            ?? SkiaSharp.SKTypeface.Default;
+        using var font = new SkiaSharp.SKFont(typeface, size);
+        return font.MeasureText(text);
     }
 
     private static string Hash(string text) =>
