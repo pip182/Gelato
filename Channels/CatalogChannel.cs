@@ -6,7 +6,9 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Channels;
+using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
@@ -116,10 +118,22 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(url)))[..16];
     }
 
+    /// <summary>The channel's card (<see cref="CatalogArt.GetChannel"/>).</summary>
     public Task<DynamicImageResponse> GetChannelImage(ImageType type, CancellationToken ct) =>
-        Task.FromResult(new DynamicImageResponse { HasImage = false });
+        Task.FromResult(
+            _art.GetChannel(thumb: type is ImageType.Thumb) is { } path
+                ? new DynamicImageResponse
+                {
+                    Path = path,
+                    Protocol = MediaProtocol.File,
+                    Format = ImageFormat.Svg,
+                    HasImage = true,
+                }
+                : new DynamicImageResponse { HasImage = false }
+        );
 
-    public IEnumerable<ImageType> GetSupportedChannelImages() => [];
+    public IEnumerable<ImageType> GetSupportedChannelImages() =>
+        [ImageType.Primary, ImageType.Thumb];
 
     public async Task<ChannelItemResult> GetChannelItems(
         InternalChannelItemQuery query,
@@ -223,9 +237,18 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
 
         // A card that cannot be written leaves the folder without an image, not the channel
         // without its catalogs.
-        var cards = catalogs
-            .Select(c => _art.Get(c.Type, c.Id, c.Name, KindOf(c.Type) is StremioMediaType.Movie))
-            .ToList();
+        var cards = await Task.WhenAll(
+                catalogs.Select(c =>
+                    _art.GetAsync(
+                        stremio,
+                        c.Type,
+                        c.Id,
+                        c.Name,
+                        KindOf(c.Type) is StremioMediaType.Movie
+                    )
+                )
+            )
+            .ConfigureAwait(false);
 
         for (var i = 0; i < catalogs.Count; i++)
             if (cards[i] is { } card)
