@@ -58,6 +58,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<ItemEditFilter>();
         services.AddSingleton<SyncPlaySources>();
         services.AddSingleton<CatalogChannelOrderFilter>();
+        services.AddSingleton<CatalogArt>();
         services.AddSingleton<CatalogChannel>();
         services.AddSingleton<IChannel>(sp => sp.GetRequiredService<CatalogChannel>());
         services.AddSingleton<ItemIdLookup>();

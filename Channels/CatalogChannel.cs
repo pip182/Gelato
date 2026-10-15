@@ -48,17 +48,20 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
     private readonly ILibraryManager _libraryManager;
     private readonly IMemoryCache _cache;
     private readonly ILogger<CatalogChannel> _log;
+    private readonly CatalogArt _art;
     private readonly Lazy<Guid> _channelId;
 
     public CatalogChannel(
         ILibraryManager libraryManager,
         IMemoryCache cache,
-        ILogger<CatalogChannel> log
+        ILogger<CatalogChannel> log,
+        CatalogArt art
     )
     {
         _libraryManager = libraryManager;
         _cache = cache;
         _log = log;
+        _art = art;
         // ChannelManager names its channel entity after the channel: the hash of "Channel " + Name.
         _channelId = new Lazy<Guid>(() =>
             libraryManager.GetNewItemId("Channel " + ChannelName, typeof(Channel))
@@ -191,8 +194,9 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
     /// <summary>
     /// The movie and series catalogs the addon lists, in its order. One switched off in the
     /// catalog settings is left out; one the settings do not know (a user's own addon) is shown.
+    /// Each has a card for an image (<see cref="CatalogArt"/>).
     /// </summary>
-    private static async Task<List<ChannelItemInfo>> ListCatalogsAsync(
+    private async Task<List<ChannelItemInfo>> ListCatalogsAsync(
         GelatoStremioProvider stremio,
         PluginConfiguration cfg
     )
@@ -203,12 +207,29 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         if (manifest is null)
             throw new HttpRequestException("The addon's manifest could not be read.");
 
-        return manifest
+        var catalogs = manifest
             .Catalogs.Where(c =>
                 c.IsImportable()
                 && KindOf(c.Type) is not null
                 && !disabled.Contains($"{c.Type}:{c.Id}")
             )
+            .ToList();
+
+        // A card that cannot be written leaves the folder without an image, not the channel
+        // without its catalogs.
+        var cards = catalogs
+            .Select(c => _art.Get(c.Type, c.Id, c.Name, KindOf(c.Type) is StremioMediaType.Movie))
+            .ToList();
+
+        for (var i = 0; i < catalogs.Count; i++)
+            if (cards[i] is { } card)
+                await PointFolderAtAsync(
+                        Encode(CatalogPrefix, catalogs[i].Type, catalogs[i].Id, "0"),
+                        card
+                    )
+                    .ConfigureAwait(false);
+
+        return catalogs
             .Select(
                 (c, i) =>
                     new ChannelItemInfo
@@ -219,6 +240,7 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
                         Type = ChannelItemType.Folder,
                         FolderType = ChannelFolderType.Container,
                         IndexNumber = i,
+                        ImageUrl = cards[i],
                     }
             )
             .ToList();
@@ -311,6 +333,37 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
                 ? ChannelMediaContentType.Episode
                 : ChannelMediaContentType.Movie,
         };
+    }
+
+    /// <summary>
+    /// Points a catalog folder Jellyfin already keeps at its card. Jellyfin sets a channel item's
+    /// image only while the item has none, so a card drawn anew would not be shown.
+    /// The folder's id is the one ChannelManager gives it (GetIdToHash and GetItemById).
+    /// </summary>
+    private async Task PointFolderAtAsync(string externalId, string card)
+    {
+        var id = _libraryManager.GetNewItemId(externalId + ChannelName + "16", typeof(Folder));
+        if (
+            _libraryManager.GetItemById(id) is not Folder folder
+            || folder.GetImageInfo(ImageType.Primary, 0)?.Path == card
+        )
+            return;
+
+        try
+        {
+            folder.SetImagePath(ImageType.Primary, card);
+            await folder
+                .UpdateToRepositoryAsync(ItemUpdateType.ImageUpdate, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(
+                "Gelato: catalog folder {Name} keeps its old image: {Error}",
+                folder.Name,
+                ex.Message
+            );
+        }
     }
 
     private static StremioMediaType? KindOf(string catalogType) =>
