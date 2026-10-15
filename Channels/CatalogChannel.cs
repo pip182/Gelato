@@ -38,7 +38,12 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
     private const string CatalogPrefix = "c";
     private const string ItemPrefix = "i";
 
-    private static int _dataVersion;
+    /// <summary>
+    /// Starts from the time the server started: Jellyfin keeps its cache of a folder on disk, and
+    /// a counter starting from 0 again would make a listing made before a restart (by other
+    /// settings, or an older Gelato) look current.
+    /// </summary>
+    private static long _dataVersion = DateTime.UtcNow.Ticks;
 
     private readonly ILibraryManager _libraryManager;
     private readonly IMemoryCache _cache;
