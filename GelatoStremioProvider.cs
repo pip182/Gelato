@@ -28,6 +28,23 @@ public class GelatoStremioProvider(
         (StremioMeta Meta, DateTime Expiry)
     > _metaCache = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Metas the addon answered 404 for, by type and id. A library scan asks for a series' meta
+    /// once per episode, so an id the addon does not have would otherwise be asked for again and
+    /// again, using up the addon's rate limit.
+    /// </summary>
+    private static readonly TimeSpan MetaMissTtl = TimeSpan.FromMinutes(30);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<
+        string,
+        DateTime
+    > _metaMisses = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Meta requests underway, so concurrent asks for one id share a single request.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<
+        string,
+        Lazy<Task<StremioMeta?>>
+    > _metaInFlight = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly System.Collections.Concurrent.ConcurrentDictionary<
         string,
         string?
@@ -208,8 +225,51 @@ public class GelatoStremioProvider(
         if (cached is not null)
             return cached;
 
+        var key = $"{mediaType}:{id}";
+        if (_metaMisses.TryGetValue(key, out var until))
+        {
+            if (until > DateTime.UtcNow)
+                throw new HttpRequestException(
+                    $"HTTP {HttpStatusCode.NotFound}: no meta for {id} (cached)",
+                    null,
+                    HttpStatusCode.NotFound
+                );
+            _metaMisses.TryRemove(key, out _);
+        }
+
+        var request = _metaInFlight.GetOrAdd(
+            key,
+            _ => new Lazy<Task<StremioMeta?>>(() => FetchMetaAsync(id, key, mediaType, ttl))
+        );
+        try
+        {
+            return await request.Value.ConfigureAwait(false);
+        }
+        finally
+        {
+            _metaInFlight.TryRemove(KeyValuePair.Create(key, request));
+        }
+    }
+
+    private async Task<StremioMeta?> FetchMetaAsync(
+        string id,
+        string key,
+        StremioMediaType mediaType,
+        TimeSpan? ttl
+    )
+    {
         var url = BuildUrl(["meta", mediaType.ToString().ToLower(), id]);
-        var r = await GetJsonAsync<StremioMetaResponse>(url);
+        StremioMetaResponse? r;
+        try
+        {
+            r = await GetJsonAsync<StremioMetaResponse>(url).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            _metaMisses[key] = DateTime.UtcNow.Add(MetaMissTtl);
+            throw;
+        }
+
         if (r?.Meta is { } meta)
             _metaCache[id] = (meta, DateTime.UtcNow.Add(ttl ?? MetaCacheTtl));
         return r?.Meta;
