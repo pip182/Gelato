@@ -46,6 +46,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<MediaSegmentFilter>();
         services.AddSingleton<LibraryStructureFilter>();
         services.AddSingleton<CatalogChannelOrderFilter>();
+        services.AddSingleton<CatalogArt>();
         services.AddSingleton<CatalogChannel>();
         services.AddSingleton<IChannel>(sp => sp.GetRequiredService<CatalogChannel>());
         services.AddSingleton<ItemIdLookup>();
