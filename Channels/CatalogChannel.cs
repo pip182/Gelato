@@ -119,7 +119,7 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         try
         {
             if (string.IsNullOrEmpty(query.FolderId))
-                return Result(await ListCatalogsAsync(stremio).ConfigureAwait(false));
+                return Result(await ListCatalogsAsync(stremio, cfg).ConfigureAwait(false));
 
             // A series is a folder to Jellyfin, but it opens as the library's series, never as
             // channel content: it has nothing to list.
@@ -183,17 +183,27 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
     private static ChannelItemResult Result(List<ChannelItemInfo> items) =>
         new() { Items = items, TotalRecordCount = items.Count };
 
-    /// <summary>The movie and series catalogs the addon lists, in its order.</summary>
+    /// <summary>
+    /// The movie and series catalogs the addon lists, in its order. One switched off in the
+    /// catalog settings is left out; one the settings do not know (a user's own addon) is shown.
+    /// </summary>
     private static async Task<List<ChannelItemInfo>> ListCatalogsAsync(
-        GelatoStremioProvider stremio
+        GelatoStremioProvider stremio,
+        PluginConfiguration cfg
     )
     {
+        var disabled = cfg.Catalogs.Where(c => !c.Enabled).Select(c => c.GetKey()).ToHashSet();
+
         var manifest = await stremio.GetManifestAsync().ConfigureAwait(false);
         if (manifest is null)
             throw new HttpRequestException("The addon's manifest could not be read.");
 
         return manifest
-            .Catalogs.Where(c => c.IsImportable() && KindOf(c.Type) is not null)
+            .Catalogs.Where(c =>
+                c.IsImportable()
+                && KindOf(c.Type) is not null
+                && !disabled.Contains($"{c.Type}:{c.Id}")
+            )
             .Select(
                 (c, i) =>
                     new ChannelItemInfo
