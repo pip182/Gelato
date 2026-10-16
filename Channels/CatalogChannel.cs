@@ -169,10 +169,30 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
 
             // A series is a folder to Jellyfin, but it opens as the library's series, never as
             // channel content: it has nothing to list.
-            if (TryParseCatalogFolder(query.FolderId, out var type, out var id, out var skip))
+            if (
+                TryParseCatalogFolder(
+                    query.FolderId,
+                    out var type,
+                    out var id,
+                    out var skip,
+                    out var genre
+                )
+            )
+            {
+                if (
+                    genre is null
+                    && skip == 0
+                    && await YearsAsync(stremio, type, id).ConfigureAwait(false)
+                        is { Count: > 0 } years
+                )
+                    return Result(
+                        await ListYearsAsync(stremio, type, id, years).ConfigureAwait(false)
+                    );
+
                 return Result(
-                    await ListPageAsync(stremio, cfg, type, id, skip).ConfigureAwait(false)
+                    await ListPageAsync(stremio, cfg, type, id, skip, genre).ConfigureAwait(false)
                 );
+            }
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
@@ -384,6 +404,75 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
     }
 
     /// <summary>
+    /// The years a catalog can be narrowed to, when what it can be narrowed to is years (a "by
+    /// year" catalog lists them as its genres): its folder then opens to a folder for each year.
+    /// None for any other catalog, which opens to its titles.
+    /// </summary>
+    private static async Task<List<string>> YearsAsync(
+        GelatoStremioProvider stremio,
+        string type,
+        string id
+    )
+    {
+        var manifest = await stremio.GetManifestAsync().ConfigureAwait(false);
+        var options =
+            manifest
+                ?.Catalogs.FirstOrDefault(c => c.Id == id && c.Type == type)
+                ?.Extra.FirstOrDefault(e =>
+                    string.Equals(e.Name, "genre", StringComparison.OrdinalIgnoreCase)
+                )
+                ?.Options ?? [];
+        return options.Count > 0 && options.All(IsYear) ? options : [];
+    }
+
+    /// <summary>A year (2024) or a decade (2020s).</summary>
+    private static bool IsYear(string option) =>
+        option.Length is 4 or 5
+        && option[..4].All(char.IsAsciiDigit)
+        && (option.Length == 4 || option[4] is 's' or 'S');
+
+    /// <summary>
+    /// A "by year" catalog's folders: one for each year, in the addon's order. Each opens to its
+    /// titles, a page at a time. There is none for all of them: asked for no year, such a catalog
+    /// lists the latest year's titles, which its first folder holds.
+    /// </summary>
+    private async Task<List<ChannelItemInfo>> ListYearsAsync(
+        GelatoStremioProvider stremio,
+        string type,
+        string id,
+        List<string> years
+    )
+    {
+        var movies = KindOf(type) is StremioMediaType.Movie;
+        var cards = await Task.WhenAll(
+                years.Select(y => _art.GetYearAsync(stremio, type, id, movies, y))
+            )
+            .ConfigureAwait(false);
+
+        var items = new List<ChannelItemInfo>();
+        for (var i = 0; i < years.Count; i++)
+        {
+            var externalId = Encode(CatalogPrefix, type, id, "0", years[i]);
+            if (cards[i] is { } card)
+                await PointFolderAtAsync(externalId, card).ConfigureAwait(false);
+
+            items.Add(
+                new ChannelItemInfo
+                {
+                    Id = externalId,
+                    Name = years[i],
+                    Type = ChannelItemType.Folder,
+                    FolderType = ChannelFolderType.Container,
+                    IndexNumber = i,
+                    ImageUrl = cards[i],
+                }
+            );
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// One page of a catalog, and a "More" folder for the next one when the catalog pages and this
     /// page did not reach its end. An addon's page is short (AIOStreams answers 20 titles), so a
     /// page here is made of as many of the addon's as it takes to hold <see cref="PageSize"/>.
@@ -393,7 +482,8 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         PluginConfiguration cfg,
         string type,
         string id,
-        int skip
+        int skip,
+        string? genre
     )
     {
         var manifest = await stremio.GetManifestAsync().ConfigureAwait(false);
@@ -409,7 +499,12 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         {
             var offset = skip + metas.Count;
             var page = await stremio
-                .GetCatalogMetasAsync(id, type, skip: offset > 0 ? offset : null)
+                .GetCatalogMetasAsync(
+                    id,
+                    type,
+                    skip: offset > 0 ? offset : null,
+                    genre: string.IsNullOrEmpty(genre) ? null : genre
+                )
                 .ConfigureAwait(false);
             metas.AddRange(page);
             if (page.Count == 0 || !pages)
@@ -428,14 +523,16 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
             )
             // An addon's pages can overlap where its list moved between two of them.
             .DistinctBy(x => x.meta.Id)
-            .Select(x => ToChannelItem(x.meta, type, id, x.position))
+            .Select(x => ToChannelItem(x.meta, type, id, x.position, genre))
             .ToList();
 
         if (pages && !ended && metas.Count > 0)
             items.Add(
                 new ChannelItemInfo
                 {
-                    Id = Encode(CatalogPrefix, type, id, (skip + metas.Count).ToString()),
+                    Id = genre is null
+                        ? Encode(CatalogPrefix, type, id, (skip + metas.Count).ToString())
+                        : Encode(CatalogPrefix, type, id, (skip + metas.Count).ToString(), genre),
                     Name = "More…",
                     Type = ChannelItemType.Folder,
                     FolderType = ChannelFolderType.Container,
@@ -457,7 +554,8 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         StremioMeta meta,
         string catalogType,
         string catalogId,
-        int position
+        int position,
+        string? genre
     )
     {
         var isSeries = meta.Type is StremioMediaType.Series;
@@ -466,7 +564,10 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
             Id = Encode(
                 ItemPrefix,
                 catalogType,
-                catalogId,
+                // A year's titles are told apart from the same places in another year's.
+                genre is null
+                    ? catalogId
+                    : $"{catalogId}@{genre}",
                 position.ToString(),
                 isSeries ? "series" : "movie",
                 meta.Id,
@@ -546,20 +647,30 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         return true;
     }
 
+    /// <summary>
+    /// A catalog folder: its catalog, where its page starts and, for a "by year" catalog's
+    /// year folders, the year (null for a folder of any other catalog).
+    /// </summary>
     private static bool TryParseCatalogFolder(
         string externalId,
         out string type,
         out string id,
-        out int skip
+        out int skip,
+        out string? genre
     )
     {
-        var parts = Decode(externalId);
-        (type, id, skip) = ("", "", 0);
-        if (parts is not [CatalogPrefix, var t, var i, var s] || !int.TryParse(s, out skip))
-            return false;
-
-        (type, id) = (t, i);
-        return true;
+        (type, id, skip, genre) = ("", "", 0, null);
+        switch (Decode(externalId))
+        {
+            case [CatalogPrefix, var t, var i, var s] when int.TryParse(s, out skip):
+                (type, id) = (t, i);
+                return true;
+            case [CatalogPrefix, var t, var i, var s, var g] when int.TryParse(s, out skip):
+                (type, id, genre) = (t, i, g);
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool TryParseItem(string? externalId, out StremioMeta? meta)

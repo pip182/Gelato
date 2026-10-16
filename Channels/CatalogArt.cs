@@ -40,6 +40,9 @@ public sealed class CatalogArt(
         (IReadOnlyList<string> Uris, DateTime Until)
     > _posters = new();
 
+    /// <summary>How many catalogs' posters are fetched at once.</summary>
+    private readonly SemaphoreSlim _fetching = new(4);
+
     // Square: Jellyfin's clients lay out cards by their image's shape, and fit fewer, larger
     // square cards to a row than poster-shaped ones.
     private const int Width = 600;
@@ -187,6 +190,30 @@ public sealed class CatalogArt(
     }
 
     /// <summary>
+    /// The card of one of a "by year" catalog's folders: the year and that year's posters.
+    /// </summary>
+    public async Task<string?> GetYearAsync(
+        GelatoStremioProvider stremio,
+        string type,
+        string id,
+        bool movies,
+        string year
+    )
+    {
+        var posters = await PostersAsync(stremio, type, id, year).ConfigureAwait(false);
+        return WriteCard(
+            movies ? "MOVIES" : "SHOWS",
+            year,
+            Year with
+            {
+                Tagline = $"Released in {year}",
+            },
+            posters,
+            $"catalog {type}/{id} {year}"
+        );
+    }
+
+    /// <summary>
     /// The card of the folder a kind's catalogs are grouped in: Movies or Shows, the catalogs it
     /// holds named under it, and the first one's posters.
     /// </summary>
@@ -256,16 +283,21 @@ public sealed class CatalogArt(
     private async Task<IReadOnlyList<string>> PostersAsync(
         GelatoStremioProvider stremio,
         string type,
-        string id
+        string id,
+        string? genre = null
     )
     {
-        var key = $"{type}:{id}";
+        var key = $"{type}:{id}:{genre}";
         if (_posters.TryGetValue(key, out var known) && known.Until > DateTime.UtcNow)
             return known.Uris;
 
+        // A "by year" catalog asks for twenty years' posters at once.
+        await _fetching.WaitAsync().ConfigureAwait(false);
         try
         {
-            var urls = (await stremio.GetCatalogMetasAsync(id, type).ConfigureAwait(false))
+            var urls = (
+                await stremio.GetCatalogMetasAsync(id, type, genre: genre).ConfigureAwait(false)
+            )
                 .Select(m => m.Poster)
                 .Where(p => !string.IsNullOrWhiteSpace(p))
                 .Distinct()
@@ -281,6 +313,10 @@ public sealed class CatalogArt(
         {
             log.LogDebug("Gelato: no posters for catalog {Key}: {Error}", key, ex.Message);
             return known.Uris ?? [];
+        }
+        finally
+        {
+            _fetching.Release();
         }
     }
 

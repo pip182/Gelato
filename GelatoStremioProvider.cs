@@ -670,12 +670,15 @@ public class GelatoStremioProvider(
         string id,
         string mediaType,
         string? search = null,
-        int? skip = null
+        int? skip = null,
+        string? genre = null
     )
     {
         var extras = new List<string>();
         if (!string.IsNullOrWhiteSpace(search))
             extras.Add($"search={Uri.EscapeDataString(search)}");
+        if (!string.IsNullOrWhiteSpace(genre))
+            extras.Add($"genre={Uri.EscapeDataString(genre)}");
         if (skip is > 0)
             extras.Add($"skip={skip}");
 
