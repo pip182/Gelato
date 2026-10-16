@@ -22,10 +22,10 @@ public sealed class CatalogArt(
     ILogger<CatalogArt> log
 )
 {
-    /// <summary>How many of a catalog's first posters fan out across the bottom of its card.</summary>
+    /// <summary>How many of a catalog's first posters its card is textured with.</summary>
     private const int Posters = 3;
 
-    /// <summary>The size posters are embedded at: twice what the card shows them at.</summary>
+    /// <summary>The size posters are embedded at: a little over what the card shows them at.</summary>
     private const int PosterWidth = 264;
     private const int PosterHeight = 396;
 
@@ -49,25 +49,15 @@ public sealed class CatalogArt(
     private const int TallHeight = 900;
 
     /// <summary>The room kept clear on either side of the name.</summary>
-    private const int Gutter = 40;
+    private const int Gutter = 48;
 
-    /// <summary>
-    /// The width of the coloured frame round a card's dark panel: 5 pixels on a phone, where a
-    /// card of 600 is shown about 180 wide.
-    /// </summary>
-    private const int Frame = 16;
+    private const int MaxTitleSize = 96;
+    private const int MinTitleSize = 36;
+    private const int MaxTaglineSize = 28;
+    private const int MinTaglineSize = 18;
 
-    /// <summary>
-    /// The corner radius cards are shown with, in the card's pixels: the catalogs' rounded by
-    /// the server's custom CSS (1.25em), the channel's by the clients' own (0.2em).
-    /// </summary>
-    private const int CardCorner = 66;
-    private const int ChannelCorner = 12;
-
-    private const int MaxTitleSize = 80;
-    private const int MinTitleSize = 32;
-    private const int MaxTaglineSize = 30;
-    private const int MinTaglineSize = 20;
+    /// <summary>The ground of every card, a near black the posters and the card's colour sit on.</summary>
+    private const string Ground = "#0b0d12";
 
     private const string FontFamilies = "Noto Sans, DejaVu Sans, sans-serif";
 
@@ -235,9 +225,9 @@ public sealed class CatalogArt(
         string what
     ) =>
         Write(
-            Draw(Width, Height, CardCorner, heading, name, style, posters),
+            Draw(Width, Height, heading, name, style, posters),
             what,
-            Draw(Width, TallHeight, CardCorner, heading, name, style, posters)
+            Draw(Width, TallHeight, heading, name, style, posters)
         );
 
     /// <summary>
@@ -355,8 +345,8 @@ public sealed class CatalogArt(
     public string? GetChannel(bool thumb) =>
         Write(
             thumb
-                ? Draw(960, 540, ChannelCorner, "CATALOGS", "Gelato", Gelato, [])
-                : Draw(Width, Height, ChannelCorner, "CATALOGS", "Gelato", Gelato, []),
+                ? Draw(960, 540, "CATALOGS", "Gelato", Gelato, [])
+                : Draw(Width, Height, "CATALOGS", "Gelato", Gelato, []),
             "the catalog channel"
         );
 
@@ -417,34 +407,29 @@ public sealed class CatalogArt(
     }
 
     /// <summary>
-    /// A card <paramref name="width"/> by <paramref name="height"/>: <paramref name="heading"/>
-    /// spaced wide at the top, the style's icon, <paramref name="name"/> and the style's line, and
-    /// <paramref name="posters"/> fanned out across the bottom when there are any.
+    /// A card <paramref name="width"/> by <paramref name="height"/>: <paramref name="posters"/>
+    /// laid edge to edge and darkened, washed with the style's colour, and in its middle the
+    /// style's icon, <paramref name="heading"/> spaced wide, <paramref name="name"/>, a short rule
+    /// and the style's line.
     /// </summary>
+    /// <remarks>
+    /// Everything that says what the card is stands in a block in its middle, no taller than a
+    /// 16:9 cut of a poster-shaped card: the Roku app shows the same image as a poster or, in its
+    /// landscape layout, as a wide tile cut at top and bottom, and cannot be told which by the
+    /// request. The posters are only a texture, and any cut of them reads the same.
+    /// </remarks>
     private static string Draw(
         int width,
         int height,
-        int corner,
         string heading,
         string name,
         Style style,
         IReadOnlyList<string> posters
     )
     {
-        // Posters take the bottom of the card, and what is above them moves up and shrinks.
-        var peek = posters.Count > 0;
-        // A poster-shaped card has room for larger posters, and keeps what is above them at its top.
-        var tall = height > width;
-
-        // The card's colour shows as a frame round a panel 80% darker, its corners following the
-        // card's own (a frame of even width).
-        var panel = width - 2 * Frame;
-        var panelHeight = height - 2 * Frame;
-        var panelCorner = Math.Max(corner - Frame, 4);
-
-        // Laid out for a square card; another keeps it centred, or at its top above the posters.
         var centre = width / 2;
-        var dy = tall && peek ? 50 : (height - Height) / 2;
+        var accent = Muted(style.To);
+        var light = Mix(accent, "#ffffff", 0.55);
 
         var text = name.Trim();
         var (titleX, titleSize) = Fit(text, width, MaxTitleSize, MinTitleSize, bold: true);
@@ -455,124 +440,93 @@ public sealed class CatalogArt(
             MinTaglineSize,
             bold: false
         );
-        // The name hangs from just under the icon, the line saying what the list is under it.
-        var titleY = dy + (peek ? 222 : 300) + titleSize;
-        var taglineY = titleY + (peek ? 46 : 58);
         var title = SecurityElement.Escape(text);
         var tagline = SecurityElement.Escape(style.Tagline);
 
-        // The heading tops the card, its letters spaced wide, between two rules running out to
-        // the gutters.
-        const int headingSize = 46;
-        const int headingSpacing = 16;
-        var headingY = dy + (peek ? 92 : 108);
-        var ruleY = headingY - 17;
+        // The block, top down: icon, heading, name, rule, line; its height known before it is placed.
+        const int iconSize = 44;
+        const int headingSize = 22;
+        const int headingSpacing = 7;
+        var headingY = iconSize + 18 + 16;
+        var titleY = headingY + 20 + (int)(titleSize * 0.74);
+        var ruleY = titleY + 26;
+        var taglineY = ruleY + 22 + (int)(taglineSize * 0.74);
+        var top = (height - (taglineY + 8)) / 2;
+
         // Each letter drawn on its own: Svg.Skia does not space letters by letter-spacing.
         var advances = heading.Select(c => Measure(c.ToString(), headingSize, bold: true)).ToList();
-        var headingWidth = (int)(advances.Sum() + (heading.Length - 1) * headingSpacing);
-        var headingX = (width - headingWidth) / 2;
+        var headingWidth = advances.Sum() + (heading.Length - 1) * headingSpacing;
+        var letterX = (width - headingWidth) / 2;
         var letters = new StringBuilder();
-        var letterX = (float)headingX;
         for (var i = 0; i < heading.Length; i++)
         {
             letters.Append(
-                $"""<text x="{letterX:0.#}" y="{headingY}" font-family="{FontFamilies}" font-weight="800" font-size="{headingSize}" fill="#ffffff" fill-opacity="0.92">{heading[i]}</text>"""
+                $"""<text x="{letterX:0.#}" y="{top + headingY}" font-family="{FontFamilies}" font-weight="700" font-size="{headingSize}" fill="{light}">{heading[i]}</text>"""
             );
             letterX += advances[i] + headingSpacing;
         }
-        var ruleEnd = headingX - 28;
-        var ruleStart = headingX + headingWidth + 28;
-        var ruleRight = width - Gutter;
 
-        // The icon in a disc under the heading, and, where no posters are, large and faint in the
-        // bottom right corner.
-        var discY = dy + (peek ? 168 : 212);
-        var discR = peek ? 50 : 66;
-        var iconScale = peek ? 2.6 : 3.4;
-        var iconX = centre - 12 * iconScale;
-        var iconY = discY - 12 * iconScale;
-        var mark = peek
-            ? ""
-            : $"""<g transform="translate({width - 230} {height - 230}) scale(9)" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>""";
-        var fan = Fan(posters, centre, height - Frame, large: tall);
+        var iconX = centre - iconSize / 2;
+        var iconScale = iconSize / 24d;
+        var y = top + titleY;
+        var rule = top + ruleY;
+        var line = top + taglineY;
+        var texture = Texture(posters, width, height);
+        var watermark =
+            posters.Count > 0
+                ? ""
+                : $"""<g transform="translate({width - 250} {height - 250}) scale(11)" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>""";
 
         return $"""
             <svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
               <defs>
-                <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stop-color="{Muted(style.To)}"/>
-                  <stop offset="1" stop-color="{Muted(style.From)}"/>
+                <linearGradient id="wash" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="{accent}" stop-opacity="0.55"/>
+                  <stop offset="1" stop-color="{accent}" stop-opacity="0.08"/>
                 </linearGradient>
-                <radialGradient id="glow" cx="0.5" cy="0.3" r="0.6">
-                  <stop offset="0" stop-color="{Muted(style.To)}" stop-opacity="0.45"/>
-                  <stop offset="1" stop-color="{Muted(style.To)}" stop-opacity="0"/>
+                <radialGradient id="hush" cx="0.5" cy="0.5" r="0.6">
+                  <stop offset="0" stop-color="{Ground}" stop-opacity="0.55"/>
+                  <stop offset="1" stop-color="{Ground}" stop-opacity="0"/>
                 </radialGradient>
-                <clipPath id="panel">
-                  <rect x="{Frame}" y="{Frame}" width="{panel}" height="{panelHeight}" rx="{panelCorner}"/>
-                </clipPath>
-                <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0" stop-color="#000000" stop-opacity="0"/>
-                  <stop offset="1" stop-color="#000000" stop-opacity="0.8"/>
-                </linearGradient>
-                <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
-                  <circle cx="3" cy="3" r="1.6" fill="#ffffff" fill-opacity="0.09"/>
-                </pattern>
               </defs>
-              <rect width="{width}" height="{height}" fill="url(#bg)"/>
-              <rect x="{Frame}" y="{Frame}" width="{panel}" height="{panelHeight}" rx="{panelCorner}" fill="#000000" fill-opacity="0.8"/>
-              <rect x="{Frame}" y="{Frame}" width="{panel}" height="{panelHeight}" rx="{panelCorner}" fill="url(#glow)"/>
-              <rect x="{Frame}" y="{Frame}" width="{panel}" height="{panelHeight}" rx="{panelCorner}" fill="url(#dots)"/>
-              {mark}
-              {fan}
-              <line x1="{Gutter}" y1="{ruleY}" x2="{ruleEnd}" y2="{ruleY}" stroke="#ffffff" stroke-opacity="0.45" stroke-width="2" stroke-linecap="round"/>
-              <line x1="{ruleStart}" y1="{ruleY}" x2="{ruleRight}" y2="{ruleY}" stroke="#ffffff" stroke-opacity="0.45" stroke-width="2" stroke-linecap="round"/>
+              <rect width="{width}" height="{height}" fill="{Ground}"/>
+              {texture}
+              <rect width="{width}" height="{height}" fill="url(#wash)"/>
+              <rect width="{width}" height="{height}" fill="url(#hush)"/>
+              {watermark}
+              <g transform="translate({iconX} {top}) scale({iconScale:0.###})" fill="none" stroke="{light}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>
               {letters}
-              <circle cx="{centre}" cy="{discY}" r="{discR}" fill="#ffffff" fill-opacity="0.16" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/>
-              <g transform="translate({iconX:0.#} {iconY:0.#}) scale({iconScale})" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>
-              <text x="{titleX}" y="{titleY}" font-family="{FontFamilies}" font-weight="700" font-size="{titleSize}" fill="#ffffff">{title}</text>
-              <text x="{taglineX}" y="{taglineY}" font-family="{FontFamilies}" font-weight="400" font-size="{taglineSize}" fill="#ffffff" fill-opacity="0.85">{tagline}</text>
+              <text x="{titleX}" y="{y}" font-family="{FontFamilies}" font-weight="700" font-size="{titleSize}" fill="#ffffff">{title}</text>
+              <rect x="{centre - 28}" y="{rule}" width="56" height="4" rx="2" fill="{accent}"/>
+              <text x="{taglineX}" y="{line}" font-family="{FontFamilies}" font-weight="400" font-size="{taglineSize}" fill="#ffffff" fill-opacity="0.72">{tagline}</text>
             </svg>
             """;
     }
 
     /// <summary>
-    /// The posters fanned out above <paramref name="bottom"/>: the first upright in the middle and
-    /// in front, the next two tilted out to its sides, and all fading into the panel's dark.
+    /// The posters three to a row from edge to edge, as many rows as fill the card, each row
+    /// starting one poster further on, and dimmed to a texture the card's words stand out on.
     /// </summary>
-    private static string Fan(IReadOnlyList<string> posters, int centre, int bottom, bool large)
+    private static string Texture(IReadOnlyList<string> posters, int width, int height)
     {
         if (posters.Count == 0)
             return "";
 
-        // Drawn back to front: the sides, then the middle one over them.
-        var places = new List<(string Uri, int X, int Y, int W, int H, int Tilt)>();
-        var (sideWidth, sideHeight, sideOffset) = large ? (200, 290, 165) : (120, 168, 128);
-        var (mainWidth, mainHeight) = large ? (240, 360) : (132, 192);
-        var fade = large ? 220 : 150;
-        for (var i = 1; i < posters.Count; i++)
-        {
-            var side = i == 1 ? -1 : 1;
-            var x = centre + side * sideOffset - sideWidth / 2;
-            places.Add((posters[i], x, bottom - sideHeight, sideWidth, sideHeight, side * 9));
-        }
-        places.Add(
-            (posters[0], centre - mainWidth / 2, bottom - mainHeight, mainWidth, mainHeight, 0)
-        );
-
-        var fan = new StringBuilder("""<g clip-path="url(#panel)">""");
-        foreach (var (uri, x, y, w, h, tilt) in places)
-        {
-            var cx = x + w / 2;
-            var cy = y + h / 2;
-            fan.Append(
-                $"""<g transform="rotate({tilt} {cx} {cy})"><rect x="{x + 6}" y="{y + 8}" width="{w}" height="{h}" fill="#000000" fill-opacity="0.45"/><image x="{x}" y="{y}" width="{w}" height="{h}" preserveAspectRatio="xMidYMin slice" href="{uri}"/><rect x="{x}" y="{y}" width="{w}" height="{h}" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/></g>"""
+        var w = width / 3d;
+        var h = w * 1.5;
+        var rows = (int)Math.Ceiling(height / h);
+        // Rows centred on the card, so a cut of it keeps whole posters in its middle.
+        var y0 = (height - rows * h) / 2;
+        var tiles = new StringBuilder("""<g opacity="0.5">""");
+        for (var row = 0; row < rows; row++)
+        for (var col = 0; col < 3; col++)
+            tiles.Append(
+                $"""<image x="{col * w:0.#}" y="{y0 + row * h:0.#}" width="{w:0.#}" height="{h:0.#}" preserveAspectRatio="xMidYMid slice" href="{posters[(row + col) % posters.Count]}"/>"""
             );
-        }
-        // The fade starts above the tallest poster's middle and is darkest at the panel's edge.
-        fan.Append(
-            $"""<rect x="0" y="{bottom - fade}" width="{centre * 2}" height="{fade}" fill="url(#fade)"/></g>"""
+        tiles.Append(
+            $"""</g><rect width="{width}" height="{height}" fill="{Ground}" fill-opacity="0.7"/>"""
         );
-        return fan.ToString();
+        return tiles.ToString();
     }
 
     /// <summary>
@@ -662,6 +616,17 @@ public sealed class CatalogArt(
             _ => (c, 0d, x),
         };
         return $"#{(int)Math.Round((r + m) * 255):x2}{(int)Math.Round((g + m) * 255):x2}{(int)Math.Round((b + m) * 255):x2}";
+    }
+
+    /// <summary><paramref name="hex"/> taken <paramref name="amount"/> of the way to <paramref name="to"/>.</summary>
+    private static string Mix(string hex, string to, double amount)
+    {
+        var a = Convert.FromHexString(hex[1..]);
+        var b = Convert.FromHexString(to[1..]);
+        return "#"
+            + string.Concat(
+                a.Zip(b, (x, y) => ((int)Math.Round(x + (y - x) * amount)).ToString("x2"))
+            );
     }
 
     private static string Hash(string text) =>
