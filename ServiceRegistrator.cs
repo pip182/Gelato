@@ -46,6 +46,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<MediaSegmentFilter>();
         services.AddSingleton<LibraryStructureFilter>();
         services.AddSingleton<CatalogChannelOrderFilter>();
+        services.AddSingleton<CatalogCardFilter>();
         services.AddSingleton<CatalogArt>();
         services.AddSingleton<CatalogChannel>();
         services.AddSingleton<IChannel>(sp => sp.GetRequiredService<CatalogChannel>());
@@ -152,6 +153,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             o.Filters.AddService<InsertActionFilter>(order: 1);
             o.Filters.AddService<SearchActionFilter>(order: 2);
             o.Filters.AddService<PlaybackInfoFilter>(order: 3);
+            o.Filters.AddService<CatalogCardFilter>();
             o.Filters.AddService<ImageResourceFilter>();
             o.Filters.AddService<DeleteResourceFilter>();
             o.Filters.AddService<DownloadFilter>();
