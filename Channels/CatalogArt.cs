@@ -45,6 +45,9 @@ public sealed class CatalogArt(
     private const int Width = 600;
     private const int Height = 600;
 
+    /// <summary>The height of a card's poster-shaped twin: 2:3, as posters are.</summary>
+    private const int TallHeight = 900;
+
     /// <summary>The room kept clear on either side of the name.</summary>
     private const int Gutter = 40;
 
@@ -136,6 +139,20 @@ public sealed class CatalogArt(
         "Browse the catalog"
     );
 
+    // The folders the catalogs are grouped in; their line names the catalogs inside.
+    private static readonly Style MoviesGroup = new(
+        Movies.Icon,
+        "#312e81",
+        "#6366f1",
+        "Browse the catalog"
+    );
+    private static readonly Style ShowsGroup = new(
+        Shows.Icon,
+        "#701a75",
+        "#c026d3",
+        "Browse the catalog"
+    );
+
     // Lucide's ice-cream-cone.
     private static readonly Style Gelato = new(
         """<path d="m7 11 4.08 10.35a1 1 0 0 0 1.84 0L17 11"/><path d="M17 7A5 5 0 0 0 7 7"/><path d="M17 7a2 2 0 0 1 0 4H7a2 2 0 0 1 0-4"/>""",
@@ -170,18 +187,75 @@ public sealed class CatalogArt(
     )
     {
         var posters = await PostersAsync(stremio, type, id).ConfigureAwait(false);
-        return Write(
-            Draw(
-                Width,
-                Height,
-                CardCorner,
-                movies ? "MOVIES" : "SHOWS",
-                name,
-                StyleOf(id, name, movies),
-                posters
-            ),
+        return WriteCard(
+            movies ? "MOVIES" : "SHOWS",
+            name,
+            StyleOf(id, name, movies),
+            posters,
             $"catalog {type}/{id}"
         );
+    }
+
+    /// <summary>
+    /// The card of the folder a kind's catalogs are grouped in: Movies or Shows, the catalogs it
+    /// holds named under it, and the first one's posters.
+    /// </summary>
+    public async Task<string?> GetGroupAsync(
+        GelatoStremioProvider stremio,
+        bool movies,
+        IReadOnlyList<(string Type, string Id, string Name)> catalogs
+    )
+    {
+        var posters =
+            catalogs.Count > 0
+                ? await PostersAsync(stremio, catalogs[0].Type, catalogs[0].Id)
+                    .ConfigureAwait(false)
+                : [];
+        var style = (movies ? MoviesGroup : ShowsGroup) with
+        {
+            Tagline = string.Join(" · ", catalogs.Select(c => c.Name)),
+        };
+        return WriteCard(
+            "CATALOGS",
+            movies ? "Movies" : "Shows",
+            style,
+            posters,
+            $"the {(movies ? "movie" : "show")} catalogs"
+        );
+    }
+
+    /// <summary>
+    /// The square card, written with its poster-shaped twin beside it (<see cref="TallOf"/>).
+    /// </summary>
+    private string? WriteCard(
+        string heading,
+        string name,
+        Style style,
+        IReadOnlyList<string> posters,
+        string what
+    ) =>
+        Write(
+            Draw(Width, Height, CardCorner, heading, name, style, posters),
+            what,
+            Draw(Width, TallHeight, CardCorner, heading, name, style, posters)
+        );
+
+    /// <summary>
+    /// The poster-shaped twin of a card, for a client that shows folders as posters and asks for
+    /// an image of that shape (the Roku app): the square card would be cut at its sides. Null
+    /// when <paramref name="card"/> is no card or has none.
+    /// </summary>
+    public static string? TallOf(string? card)
+    {
+        if (
+            card is null
+            || !card.EndsWith(".svg", StringComparison.Ordinal)
+            || Path.GetFileName(Path.GetDirectoryName(card)) != "catalog-art"
+        )
+            return null;
+
+        var tall = card[..^4] + "-tall.svg";
+        return File.Exists(tall) ? tall : null;
     }
 
     /// <summary>
@@ -286,19 +360,20 @@ public sealed class CatalogArt(
             "the catalog channel"
         );
 
-    private string? Write(string svg, string what)
+    private string? Write(string svg, string what, string? tall = null)
     {
         var path = Path.Combine(appPaths.CachePath, "gelato", "catalog-art", $"{Hash(svg)}.svg");
-        if (File.Exists(path))
+        var tallPath = path[..^4] + "-tall.svg";
+        if (File.Exists(path) && (tall is null || File.Exists(tallPath)))
             return path;
 
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            // Written beside its place and moved there, so a card half written is never used.
-            var partial = path + ".partial";
-            File.WriteAllText(partial, svg);
-            File.Move(partial, path, overwrite: true);
+            // The twin first: a card is taken to have one once it is there.
+            if (tall is not null)
+                WriteWhole(tallPath, tall);
+            WriteWhole(path, svg);
             return path;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -306,6 +381,14 @@ public sealed class CatalogArt(
             log.LogWarning("Gelato: no image for {What}: {Error}", what, ex.Message);
             return null;
         }
+    }
+
+    /// <summary>Written beside its place and moved there, so a card half written is never used.</summary>
+    private static void WriteWhole(string path, string svg)
+    {
+        var partial = path + ".partial";
+        File.WriteAllText(partial, svg);
+        File.Move(partial, path, overwrite: true);
     }
 
     private static Style StyleOf(string id, string name, bool movies)
@@ -350,6 +433,8 @@ public sealed class CatalogArt(
     {
         // Posters take the bottom of the card, and what is above them moves up and shrinks.
         var peek = posters.Count > 0;
+        // A poster-shaped card has room for larger posters, and keeps what is above them at its top.
+        var tall = height > width;
 
         // The card's colour shows as a frame round a panel 80% darker, its corners following the
         // card's own (a frame of even width).
@@ -357,9 +442,9 @@ public sealed class CatalogArt(
         var panelHeight = height - 2 * Frame;
         var panelCorner = Math.Max(corner - Frame, 4);
 
-        // Laid out for a square card; another keeps it centred.
+        // Laid out for a square card; another keeps it centred, or at its top above the posters.
         var centre = width / 2;
-        var dy = (height - Height) / 2;
+        var dy = tall && peek ? 50 : (height - Height) / 2;
 
         var text = name.Trim();
         var (titleX, titleSize) = Fit(text, width, MaxTitleSize, MinTitleSize, bold: true);
@@ -409,7 +494,7 @@ public sealed class CatalogArt(
         var mark = peek
             ? ""
             : $"""<g transform="translate({width - 230} {height - 230}) scale(9)" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{style.Icon}</g>""";
-        var fan = Fan(posters, centre, height - Frame);
+        var fan = Fan(posters, centre, height - Frame, large: tall);
 
         return $"""
             <svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
@@ -454,22 +539,25 @@ public sealed class CatalogArt(
     /// The posters fanned out above <paramref name="bottom"/>: the first upright in the middle and
     /// in front, the next two tilted out to its sides, and all fading into the panel's dark.
     /// </summary>
-    private static string Fan(IReadOnlyList<string> posters, int centre, int bottom)
+    private static string Fan(IReadOnlyList<string> posters, int centre, int bottom, bool large)
     {
         if (posters.Count == 0)
             return "";
 
         // Drawn back to front: the sides, then the middle one over them.
         var places = new List<(string Uri, int X, int Y, int W, int H, int Tilt)>();
-        const int sideWidth = 120;
-        const int sideHeight = 168;
+        var (sideWidth, sideHeight, sideOffset) = large ? (200, 290, 165) : (120, 168, 128);
+        var (mainWidth, mainHeight) = large ? (240, 360) : (132, 192);
+        var fade = large ? 220 : 150;
         for (var i = 1; i < posters.Count; i++)
         {
             var side = i == 1 ? -1 : 1;
-            var x = centre + side * 128 - sideWidth / 2;
+            var x = centre + side * sideOffset - sideWidth / 2;
             places.Add((posters[i], x, bottom - sideHeight, sideWidth, sideHeight, side * 9));
         }
-        places.Add((posters[0], centre - 66, bottom - 192, 132, 192, 0));
+        places.Add(
+            (posters[0], centre - mainWidth / 2, bottom - mainHeight, mainWidth, mainHeight, 0)
+        );
 
         var fan = new StringBuilder("""<g clip-path="url(#panel)">""");
         foreach (var (uri, x, y, w, h, tilt) in places)
@@ -482,7 +570,7 @@ public sealed class CatalogArt(
         }
         // The fade starts above the tallest poster's middle and is darkest at the panel's edge.
         fan.Append(
-            $"""<rect x="0" y="{bottom - 150}" width="{centre * 2}" height="150" fill="url(#fade)"/></g>"""
+            $"""<rect x="0" y="{bottom - fade}" width="{centre * 2}" height="{fade}" fill="url(#fade)"/></g>"""
         );
         return fan.ToString();
     }

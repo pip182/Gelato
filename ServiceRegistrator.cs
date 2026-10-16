@@ -58,6 +58,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<ItemEditFilter>();
         services.AddSingleton<SyncPlaySources>();
         services.AddSingleton<CatalogChannelOrderFilter>();
+        services.AddSingleton<CatalogCardFilter>();
         services.AddSingleton<CatalogArt>();
         services.AddSingleton<CatalogChannel>();
         services.AddSingleton<IChannel>(sp => sp.GetRequiredService<CatalogChannel>());
@@ -179,6 +180,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             o.Filters.AddService<PersonActionFilter>(order: 2);
             o.Filters.AddService<SimilarActionFilter>(order: 2);
             o.Filters.AddService<SuggestionsActionFilter>(order: 2);
+            o.Filters.AddService<CatalogCardFilter>();
             o.Filters.AddService<ImageResourceFilter>();
             o.Filters.AddService<DeleteResourceFilter>();
             // After InsertActionFilter: a search result's download names the result, which that

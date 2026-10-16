@@ -16,8 +16,9 @@ namespace Gelato.Channels;
 
 /// <summary>
 /// The addon's catalogs as a Jellyfin channel, browsed live the way Stremio's Discover does:
-/// nothing is imported to see them. Each catalog is a folder holding one page of the addon's
-/// answer, and a "More" folder at its end holds the next one.
+/// nothing is imported to see them. The movie catalogs and the show catalogs are each grouped in a
+/// folder; each catalog is a folder holding one page of the addon's answer, and a "More" folder at
+/// its end holds the next one.
 /// </summary>
 /// <remarks>
 /// Jellyfin asks a channel for a whole folder and keeps the answer for three hours; it never
@@ -43,6 +44,7 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
     /// <summary>The position "More" takes, after every title of a page.</summary>
     private const int MorePosition = 1_000_000;
 
+    private const string GroupPrefix = "g";
     private const string CatalogPrefix = "c";
     private const string ItemPrefix = "i";
 
@@ -147,7 +149,23 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         try
         {
             if (string.IsNullOrEmpty(query.FolderId))
-                return Result(await ListCatalogsAsync(stremio, cfg).ConfigureAwait(false));
+            {
+                var top = await ListTopAsync(stremio, cfg).ConfigureAwait(false);
+                RemoveUnlisted(top);
+                return Result(top);
+            }
+
+            if (TryParseGroup(query.FolderId, out var kind))
+                return Result(
+                    await ListCatalogsAsync(
+                            stremio,
+                            (await CatalogsAsync(stremio, cfg).ConfigureAwait(false))
+                                .Where(c => KindOf(c.Type) == kind)
+                                .ToList(),
+                            grouped: true
+                        )
+                        .ConfigureAwait(false)
+                );
 
             // A series is a folder to Jellyfin, but it opens as the library's series, never as
             // channel content: it has nothing to list.
@@ -212,11 +230,88 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         new() { Items = items, TotalRecordCount = items.Count };
 
     /// <summary>
+    /// The channel's first level: a Movies and a Shows folder, each holding its kind's catalogs,
+    /// so a client shows two cards to choose between, not every catalog side by side. With
+    /// catalogs of one kind only, those catalogs themselves.
+    /// </summary>
+    private async Task<List<ChannelItemInfo>> ListTopAsync(
+        GelatoStremioProvider stremio,
+        PluginConfiguration cfg
+    )
+    {
+        var catalogs = await CatalogsAsync(stremio, cfg).ConfigureAwait(false);
+        var kinds = catalogs.Select(c => KindOf(c.Type)!.Value).Distinct().ToList();
+        if (kinds.Count < 2)
+            return await ListCatalogsAsync(stremio, catalogs, grouped: false).ConfigureAwait(false);
+
+        var groups = new List<ChannelItemInfo>();
+        foreach (var kind in kinds)
+        {
+            var movies = kind is StremioMediaType.Movie;
+            var ofKind = catalogs
+                .Where(c => KindOf(c.Type) == kind)
+                .Select(c => (c.Type, c.Id, c.Name))
+                .ToList();
+            var externalId = Encode(GroupPrefix, movies ? "movie" : "series");
+            var card = await _art.GetGroupAsync(stremio, movies, ofKind).ConfigureAwait(false);
+            if (card is not null)
+                await PointFolderAtAsync(externalId, card).ConfigureAwait(false);
+
+            groups.Add(
+                new ChannelItemInfo
+                {
+                    Id = externalId,
+                    Name = movies ? "Movies" : "Shows",
+                    Type = ChannelItemType.Folder,
+                    FolderType = ChannelFolderType.Container,
+                    IndexNumber = groups.Count,
+                    ImageUrl = card,
+                }
+            );
+        }
+
+        return groups;
+    }
+
+    /// <summary>
+    /// Takes the items Jellyfin keeps at the channel's first level out where the level no longer
+    /// lists them: the catalogs that were there before they were grouped, or the other way round.
+    /// </summary>
+    /// <remarks>
+    /// Jellyfin removes an unlisted item only when it is in the page the client asked for, so a
+    /// first look at the channel asking for one item left the rest for the three hours the listing
+    /// is kept. A catalog taken out comes back where it is listed now, under the same id.
+    /// </remarks>
+    private void RemoveUnlisted(List<ChannelItemInfo> listed)
+    {
+        var ids = listed.Select(i => i.Id).ToHashSet();
+        var unlisted = _libraryManager
+            .GetItemList(new InternalItemsQuery { ParentId = ChannelId })
+            .Where(i => !ids.Contains(i.ExternalId ?? ""))
+            .ToList();
+
+        foreach (var item in unlisted)
+        {
+            try
+            {
+                _libraryManager.DeleteItem(item, new DeleteOptions { DeleteFileLocation = false });
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(
+                    "Gelato: catalog folder {Name} could not be taken out: {Error}",
+                    item.Name,
+                    ex.Message
+                );
+            }
+        }
+    }
+
+    /// <summary>
     /// The movie and series catalogs the addon lists, in its order. One switched off in the
     /// catalog settings is left out; one the settings do not know (a user's own addon) is shown.
-    /// Each has a card for an image (<see cref="CatalogArt"/>).
     /// </summary>
-    private async Task<List<ChannelItemInfo>> ListCatalogsAsync(
+    private static async Task<List<StremioCatalog>> CatalogsAsync(
         GelatoStremioProvider stremio,
         PluginConfiguration cfg
     )
@@ -227,14 +322,26 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         if (manifest is null)
             throw new HttpRequestException("The addon's manifest could not be read.");
 
-        var catalogs = manifest
+        return manifest
             .Catalogs.Where(c =>
                 c.IsImportable()
                 && KindOf(c.Type) is not null
                 && !disabled.Contains($"{c.Type}:{c.Id}")
             )
             .ToList();
+    }
 
+    /// <summary>
+    /// A folder for each of <paramref name="catalogs"/>, with a card for an image
+    /// (<see cref="CatalogArt"/>). In a Movies or Shows folder a catalog goes by its name alone;
+    /// side by side with the other kind's, its kind follows the name.
+    /// </summary>
+    private async Task<List<ChannelItemInfo>> ListCatalogsAsync(
+        GelatoStremioProvider stremio,
+        List<StremioCatalog> catalogs,
+        bool grouped
+    )
+    {
         // A card that cannot be written leaves the folder without an image, not the channel
         // without its catalogs.
         var cards = await Task.WhenAll(
@@ -264,8 +371,9 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
                     new ChannelItemInfo
                     {
                         Id = Encode(CatalogPrefix, c.Type, c.Id, "0"),
-                        Name =
-                            $"{c.Name} · {(KindOf(c.Type) is StremioMediaType.Movie ? "Movies" : "Shows")}",
+                        Name = grouped
+                            ? c.Name
+                            : $"{c.Name} · {(KindOf(c.Type) is StremioMediaType.Movie ? "Movies" : "Shows")}",
                         Type = ChannelItemType.Folder,
                         FolderType = ChannelFolderType.Container,
                         IndexNumber = i,
@@ -427,6 +535,16 @@ public sealed class CatalogChannel : IChannel, IHasCacheKey
         string.IsNullOrEmpty(externalId)
             ? []
             : externalId.Split('/').Select(Uri.UnescapeDataString).ToArray();
+
+    private static bool TryParseGroup(string externalId, out StremioMediaType kind)
+    {
+        kind = default;
+        if (Decode(externalId) is not [GroupPrefix, var type] || KindOf(type) is not { } k)
+            return false;
+
+        kind = k;
+        return true;
+    }
 
     private static bool TryParseCatalogFolder(
         string externalId,
