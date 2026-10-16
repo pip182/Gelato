@@ -6,13 +6,20 @@ using Microsoft.AspNetCore.Mvc.Filters;
 namespace Gelato.Filters;
 
 /// <summary>
-/// Lists a folder of the catalog channel in the addon's order, whatever order the client asks for.
+/// Lists a folder of the catalog channel in the addon's order, whatever order the client asks for,
+/// and one level of it at a time.
 /// </summary>
 /// <remarks>
 /// A catalog's order is what it says: most popular first, newest first. Clients sort a folder by
 /// name unless told otherwise, which turns "Popular" into an alphabetical list. The channel puts
 /// each title's place in its index number (<see cref="CatalogChannel"/>), and the listing is
 /// sorted by it.
+/// <para>
+/// Some clients (Roku) ask for a folder's items recursively. For the channel that gives every
+/// title of every catalog opened so far, mixed in with the catalogs' folders, in place of the
+/// catalogs; and Jellyfin then takes each title for one the channel has stopped listing and
+/// removes it. So the channel is always listed a level at a time.
+/// </para>
 /// </remarks>
 public sealed class CatalogChannelOrderFilter(CatalogChannel channel) : IAsyncActionFilter
 {
@@ -22,6 +29,10 @@ public sealed class CatalogChannelOrderFilter(CatalogChannel channel) : IAsyncAc
         {
             ctx.ActionArguments["sortBy"] = new[] { ItemSortBy.IndexNumber };
             ctx.ActionArguments["sortOrder"] = new[] { SortOrder.Ascending };
+            if (ctx.ActionArguments.ContainsKey("recursive"))
+            {
+                ctx.ActionArguments["recursive"] = false;
+            }
         }
 
         return next();
